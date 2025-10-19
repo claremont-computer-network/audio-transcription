@@ -247,6 +247,95 @@ With diarization enabled, transcripts include speaker labels:
 
 ---
 
+## 7. Transcript Processing Workflow
+
+Once you have transcript JSON files, you can use the included tools to find and format them into readable transcripts.
+
+### Find Transcripts by Time Range
+
+Use `collect_json.py` to find transcript files within a specific time range based on their timestamps:
+
+```bash
+# Find transcripts from a specific time period
+python text_processing/collect_json.py ./text "2025-10-18 23:40:00" "2025-10-19 01:30:00"
+
+# Output: List of matching JSON files
+/path/to/20251018_234500_transcript_meta.json
+/path/to/20251018_234813_transcript_meta.json
+/path/to/20251019_001500_transcript_meta.json
+```
+
+**File naming pattern:** `YYYYMMDD_HHMMSS_transcript_meta.json`
+- Example: `20251018_234813_transcript_meta.json` = Oct 18, 2025 at 23:48:13
+
+### Convert to Readable Format
+
+Use `json_to_transcript.py` to convert JSON files into clean, readable transcripts:
+
+```bash
+# Convert single file
+python text_processing/json_to_transcript.py 20251018_234813_transcript_meta.json
+
+# Convert multiple files
+python text_processing/json_to_transcript.py file1.json file2.json file3.json
+
+# Output format:
+=== 20251018_234813_transcript_meta.json ===
+File created: 2025-10-18 23:48:13
+
+[A, 00:00] something, is that good for you?
+[B, 00:02] Yeah, I mean I like it. I think it's a lot better than that to be honest.
+[A, 00:05] Yeah, yeah.
+[B, 00:09] Oh Yeah, so I think we're gonna move at light speed now.
+[A, 00:12] Yes bro.
+```
+
+### Complete Pipeline
+
+Combine both tools to find and format transcripts from a time range:
+
+```bash
+# Find files in time range and convert them all to readable format
+python text_processing/collect_json.py ./text "2025-10-18 23:40:00" "2025-10-19 01:30:00" | \
+xargs python text_processing/json_to_transcript.py
+
+# Save to file
+python text_processing/collect_json.py ./text "2025-10-18 23:40:00" "2025-10-19 01:30:00" | \
+xargs python text_processing/json_to_transcript.py > meeting_transcript.txt
+```
+
+### Advanced Usage Examples
+
+```bash
+# Process last hour of transcripts
+end_time=$(date '+%Y-%m-%d %H:%M:%S')
+start_time=$(date -d '1 hour ago' '+%Y-%m-%d %H:%M:%S')
+python text_processing/collect_json.py ./text "$start_time" "$end_time" | \
+xargs python text_processing/json_to_transcript.py
+
+# Count number of transcript files in time range
+python text_processing/collect_json.py ./text "2025-10-18 00:00:00" "2025-10-19 00:00:00" | wc -l
+
+# Process all transcripts from a specific day
+python text_processing/collect_json.py ./text "2025-10-18 00:00:00" "2025-10-18 23:59:59" | \
+xargs python text_processing/json_to_transcript.py > daily_transcript.txt
+
+# Get just the filenames for other processing
+python text_processing/collect_json.py ./text "2025-10-18 23:40:00" "2025-10-19 01:30:00"
+```
+
+### Output Features
+
+The transcript processor provides:
+- ✅ **Speaker identification** (A, B, C, etc. from diarization)
+- ✅ **Relative timestamps** (MM:SS from start of each recording)
+- ✅ **File creation time** (extracted from filename timestamp)
+- ✅ **Clean text format** (no JSON formatting clutter)
+- ✅ **Chronological ordering** (processes files in time order)
+- ✅ **Pipeline-friendly** (works with shell pipes and xargs)
+
+---
+
 ## Troubleshooting
 
 ### ❌ Common Setup Issues
