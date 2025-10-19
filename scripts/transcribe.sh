@@ -213,14 +213,18 @@ process_files() {
   
   echo "🔍 Checking for unprocessed files..."
   
-  # First, collect all audio files into an array
+  # First, collect all audio files into an array using a more reliable method
   echo "   📋 Scanning audio directory: $AUDIO_DIR"
   local all_files=()
-  while IFS= read -r -d '' audio_file; do
-    all_files+=("$audio_file")
+  
+  # Use mapfile (readarray) which is more reliable than while loops
+  mapfile -t all_files < <(find "$AUDIO_DIR" \( -name "*.flac" -o -name "*.wav" \) -type f | sort)
+  
+  total_files=${#all_files[@]}
+  
+  for audio_file in "${all_files[@]}"; do
     echo "      Found: $(basename "$audio_file")"
-    ((total_files++))
-  done < <(find "$AUDIO_DIR" \( -name "*.flac" -o -name "*.wav" \) -type f -print0 | sort -z)
+  done
   
   echo "   📊 Total audio files found: $total_files"
   
