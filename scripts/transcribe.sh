@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# audio-telemetry: transcribe FLAC files using Whisper API with speaker diarization
+
+set -euo pipefail
+
+# Load environment variables from .env file
+if [[ -f "$(dirname "$0")/../.env" ]]; then
+  source "$(dirname "$0")/../.env"
+  echo "✓ Loaded .env file"
+else
+  echo "⚠ No .env file found at $(dirname "$0")/../.env"
+fi
+
+# Configuration - Use .env values or defaults
+AUDIO_DIR=${AUDIO_DIR:-"$(dirname "$0")/../audio/recordings"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$(pwd)"}  # Save to current directory
+API_KEY=${OPENAI_API_KEY:-""}
+CHECK_INTERVAL=${CHECK_INTERVAL:-60}  # seconds between checks
+WHISPER_MODEL=${WHISPER_MODEL:-"whisper-1"}  # Use .env value
+ENABLE_DIARIZATION=${ENABLE_DIARIZATION:-false}  # Use .env value
+AUTO_FIX_AUDIO=${AUTO_FIX_AUDIO:-true}  # Auto-fix corrupted metadata
+
+# Validate API key
+if [[ -z "$API_KEY" ]]; then
+  echo "ERROR: OpenAI API key required. Set OPENAI_API_KEY in .env file." >&2
+  exit 1
+fi
+
+echo "== audio-telemetry transcription =="
+echo "Audio dir:     $AUDIO_DIR"
+echo "Output dir:    $OUTPUT_DIR"
+echo "Check interval: ${CHECK_INTERVAL}s"
+echo "Model:         $WHISPER_MODEL"
+echo "Diarization:   $ENABLE_DIARIZATION"
+echo "Auto-fix audio: $AUTO_FIX_AUDIO"
+echo "API Key:       ${API_KEY:0:8}..." # Show first 8 chars only
+echo
+
+# Check if audio directory exists
+if [[ ! -d "$AUDIO_DIR" ]]; then
+  echo "ERROR: Audio directory does not exist: $AUDIO_DIR" >&2
+  exit 1
+fi
+
+# Create temp directory for processed audio (cleaned up on exit)
+TEMP_DIR="${OUTPUT_DIR}/.temp_audio"
+mkdir -p "$TEMP_DIR"
+
+# Show what files we found
+echo "Scanning for audio files in: $AUDIO_DIR"
+audio_files=($(find "$AUDIO_DIR" -name "*.flac" -o -name "*.wav" -type f))
+echo "Found ${#audio_files[@]} audio file(s):"
+for file in "${audio_files[@]}"; do
+  echo "  - $(basename "$file") ($(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null) bytes)"
+done
+echo
+
+# Function to check and fix audio metadata
+fix_audio_metadata() {
+  local input_file="$1"
+  local output_file="$2"
+  
+  echo "   🔧 Checking audio metadata..."
+  
+  # Check if ffprobe can read the duration properly
+  local duration
+  duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input_file" 2>/dev/null || echo "")
+  
+  if [[ -z "$duration" || "$duration" == "N/A" ]]; then
+    echo "   ⚠ Corrupted metadata detected, fixing..."
+    # Re-encode to fix metadata while preserving quality
+    if ffmpeg -i "$input_file" -c:a flac -compression_level 8 "$output_file" >/dev/null 2>&1; then
+      echo "   ✅ Metadata fixed ($(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null || echo "unknown")s)"
+      return 0
+    else
+      echo "   ❌ Failed to fix metadata" >&2
+      return 1
+    fi
+  else
+    echo "   ✅ Metadata looks good (${duration}s)"
+    # Just copy the file if metadata is fine
+    cp "$input_file" "$output_file"
+    return 0
+  fi
+}
+
+# Function to transcribe a single file
+transcribe_file() {
+  local audio_file="$1"
+  local base_name="$(basename "${audio_file%.*}")"
+  local transcript_file="${OUTPUT_DIR}/${base_name}.txt"
+  local metadata_file="${OUTPUT_DIR}/${base_name}_transcript_meta.json"
+  
+  echo "📁 Processing: $(basename "$audio_file")"
+  echo "   Output: $transcript_file"
+  
+  # Skip if transcript already exists
+  if [[ -f "$transcript_file" ]]; then
+    echo "   ⏭ Transcript already exists, skipping"
+    return 0
+  fi
+  
+  echo "   🎤 Starting transcription..."
+  
+  # Prepare audio file for API
+  local processed_audio="$audio_file"
+  local temp_audio="${TEMP_DIR}/${base_name}_processed.flac"
+  local cleanup_temp=false
+  
+  if [[ "$AUTO_FIX_AUDIO" == "true" && "${audio_file,,}" == *.flac ]]; then
+    if fix_audio_metadata "$audio_file" "$temp_audio"; then
+      processed_audio="$temp_audio"
+      cleanup_temp=true
+      echo "   📁 Using processed audio file"
+    else
+      echo "   ⚠ Using original file despite metadata issues"
+    fi
+  fi
+  
+  # Prepare curl command based on diarization setting
+  local curl_args=(
+    -X POST
+    -H "Authorization: Bearer $API_KEY"
+    -H "Content-Type: multipart/form-data"
+    -F "file=@$processed_audio"
+  )
+  
+  if [[ "$ENABLE_DIARIZATION" == "true" ]]; then
+    echo "   🎭 Using diarization model: gpt-4o-transcribe-diarize"
+    curl_args+=(
+      -F "model=gpt-4o-transcribe-diarize"
+      -F "response_format=diarized_json"
+      -F "chunking_strategy=auto"
+    )
+  else
+    echo "   🎙 Using standard transcription model: $WHISPER_MODEL"
+    curl_args+=(
+      -F "model=$WHISPER_MODEL"
+      -F "response_format=verbose_json"
+    )
+    
+    # Only add timestamp granularities for whisper-1
+    if [[ "$WHISPER_MODEL" == "whisper-1" ]]; then
+      curl_args+=(
+        -F "timestamp_granularities[]=word"
+        -F "timestamp_granularities[]=segment"
+      )
+    fi
+  fi
+  
+  # Make API request
+  echo "   🌐 Sending to OpenAI API..."
+  local response
+  response=$(curl -s "${curl_args[@]}" "https://api.openai.com/v1/audio/transcriptions")
+  
+  echo "   📥 Response received (${#response} chars)"
+  
+  # Clean up temp file immediately after API call
+  if [[ "$cleanup_temp" == "true" && -f "$temp_audio" ]]; then
+    rm -f "$temp_audio"
+    echo "   🧹 Cleaned up temporary audio file"
+  fi
+  
+  # Check for API errors
+  if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+    echo "   ❌ API Error: $(echo "$response" | jq -r '.error.message')" >&2
+    echo "   Full response: $response" >&2
+    return 1
+  fi
+  
+  # Extract transcript text based on response format
+  local transcript_text
+  if [[ "$ENABLE_DIARIZATION" == "true" ]]; then
+    # For diarized_json format, extract text with speaker labels
+    if echo "$response" | jq -e '.segments' >/dev/null 2>&1; then
+      # Create formatted transcript with speaker labels
+      transcript_text=$(echo "$response" | jq -r '.segments[] | "[Speaker \(.speaker // "Unknown")] \(.text)"' | paste -sd ' ')
+    else
+      # Fallback to plain text if segments not available
+      transcript_text=$(echo "$response" | jq -r '.text // .transcript // ""')
+    fi
+  else
+    # For verbose_json format
+    transcript_text=$(echo "$response" | jq -r '.text')
+  fi
+  
+  # Check if we got text
+  if [[ -z "$transcript_text" || "$transcript_text" == "null" ]]; then
+    echo "   ❌ No text content in response" >&2
+    echo "   Response: $response" >&2
+    return 1
+  fi
+  
+  # Save transcript text
+  echo "$transcript_text" > "$transcript_file"
+  
+  # Save full metadata response
+  echo "$response" | jq '.' > "$metadata_file"
+  
+  echo "   ✅ Success! Files saved:"
+  echo "      📄 $(basename "$transcript_file")"
+  echo "      📋 $(basename "$metadata_file")"
+  echo "   📝 Preview: ${transcript_text:0:100}..."
+  echo
+}
+
+# Function to process all unprocessed files
+process_files() {
+  local processed_count=0
+  
+  echo "🔍 Checking for unprocessed files..."
+  
+  # Find all audio files without corresponding transcripts
+  while IFS= read -r -d '' audio_file; do
+    local base_name="$(basename "${audio_file%.*}")"
+    local transcript_file="${OUTPUT_DIR}/${base_name}.txt"
+    
+    if [[ ! -f "$transcript_file" ]]; then
+      if transcribe_file "$audio_file"; then
+        ((processed_count++))
+      fi
+      
+      # Small delay to avoid rate limiting
+      sleep 2
+    else
+      echo "⏭ Already processed: $(basename "$audio_file")"
+    fi
+  done < <(find "$AUDIO_DIR" \( -name "*.flac" -o -name "*.wav" \) -type f -print0 | sort -z)
+  
+  if [[ $processed_count -gt 0 ]]; then
+    echo "✅ Processed $processed_count new files"
+  else
+    echo "💤 No new files to process"
+  fi
+  echo "---"
+}
+
+# Cleanup function
+cleanup() {
+  echo "🧹 Cleaning up temporary files..."
+  if [[ -d "$TEMP_DIR" ]]; then
+    rm -rf "$TEMP_DIR"
+    echo "   ✅ Removed temporary directory: $TEMP_DIR"
+  fi
+  echo "� Stopping transcription monitor..."
+  exit 0
+}
+
+# Main loop
+echo "� Starting transcription monitoring..."
+echo "Press Ctrl+C to stop"
+echo
+
+trap cleanup INT
+
+while true; do
+  process_files
+  sleep "$CHECK_INTERVAL"
+done
