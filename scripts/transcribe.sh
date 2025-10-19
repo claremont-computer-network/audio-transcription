@@ -86,6 +86,84 @@ fix_audio_metadata() {
   fi
 }
 
+# Function to detect if audio file contains meaningful speech
+detect_speech() {
+  local audio_file="$1"
+  
+  echo "   🔊 Analyzing audio content..."
+  
+  # Get audio duration first - handle errors gracefully
+  local duration
+  duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file" 2>/dev/null || echo "0")
+  
+  # Skip very short files (less than 2 seconds) - use awk for portability
+  if [[ -n "$duration" && "$duration" != "0" ]]; then
+    local is_short=$(awk -v dur="$duration" 'BEGIN { print (dur < 2) }')
+    if [[ "$is_short" == "1" ]]; then
+      echo "   ⏩ Audio too short (${duration}s) - likely not meaningful speech"
+      return 1  # Return 1 means "skip this file"
+    fi
+  fi
+  
+  # Method 1: Use volumedetect to check overall audio levels
+  local volume_output
+  volume_output=$(ffmpeg -i "$audio_file" -af "volumedetect" -f null - 2>&1 || true)
+  
+  if [[ -n "$volume_output" ]]; then
+    local mean_volume=$(echo "$volume_output" | grep "mean_volume" | sed 's/.*mean_volume: \([-0-9.]*\) dB.*/\1/' || echo "")
+    local max_volume=$(echo "$volume_output" | grep "max_volume" | sed 's/.*max_volume: \([-0-9.]*\) dB.*/\1/' || echo "")
+    
+    if [[ -n "$mean_volume" || -n "$max_volume" ]]; then
+      echo "   📊 Audio stats: duration=${duration}s, mean_volume=${mean_volume}dB, max_volume=${max_volume}dB"
+    fi
+    
+    # Skip if audio is very quiet (likely silence or background noise only)
+    if [[ -n "$mean_volume" && "$mean_volume" != "" ]]; then
+      local is_quiet=$(awk -v vol="$mean_volume" 'BEGIN { print (vol < -50) }')
+      if [[ "$is_quiet" == "1" ]]; then
+        echo "   🔇 Audio appears to be mostly silence (mean volume: ${mean_volume}dB < -50dB)"
+        return 1
+      fi
+    fi
+    
+    if [[ -n "$max_volume" && "$max_volume" != "" ]]; then
+      local is_very_quiet=$(awk -v vol="$max_volume" 'BEGIN { print (vol < -35) }')
+      if [[ "$is_very_quiet" == "1" ]]; then
+        echo "   🔇 Audio appears very quiet (max volume: ${max_volume}dB < -35dB)"
+        return 1
+      fi
+    fi
+  fi
+  
+  # Method 2: Detect percentage of silence - handle errors gracefully
+  if command -v awk >/dev/null 2>&1; then
+    local silence_output
+    silence_output=$(ffmpeg -i "$audio_file" -af "silencedetect=noise=-40dB:duration=1" -f null - 2>&1 || true)
+    
+    if [[ -n "$silence_output" ]]; then
+      local silence_duration
+      silence_duration=$(echo "$silence_output" | grep "silence_duration" | sed 's/.*silence_duration: \([0-9.]*\).*/\1/' | awk '{sum+=$1} END {print sum+0}' || echo "0")
+      
+      if [[ -n "$duration" && -n "$silence_duration" && "$duration" != "0" && "$silence_duration" != "0" ]]; then
+        local silence_percentage
+        silence_percentage=$(awk -v sil="$silence_duration" -v dur="$duration" 'BEGIN { printf "%.2f", (sil / dur) * 100 }')
+        
+        echo "   📈 Silence analysis: ${silence_duration}s of ${duration}s is silent (${silence_percentage}%)"
+        
+        # Skip if more than 80% is silence
+        local is_mostly_silent=$(awk -v pct="$silence_percentage" 'BEGIN { print (pct > 80) }')
+        if [[ "$is_mostly_silent" == "1" ]]; then
+          echo "   🔇 Audio is mostly silent (${silence_percentage}% > 80%)"
+          return 1
+        fi
+      fi
+    fi
+  fi
+  
+  echo "   ✅ Audio contains speech - proceeding with transcription"
+  return 0  # Return 0 means "process this file"
+}
+
 # Function to transcribe a single file
 transcribe_file() {
   local audio_file="$1"
@@ -99,6 +177,15 @@ transcribe_file() {
   # Skip if transcript already exists
   if [[ -f "$transcript_file" ]]; then
     echo "   ⏭ Transcript already exists, skipping"
+    return 0
+  fi
+  
+  # Check if audio contains meaningful speech
+  if ! detect_speech "$audio_file"; then
+    echo "   🔇 Skipping silent/empty audio - saving API costs"
+    # Create placeholder transcript to mark as processed
+    echo "[SILENT AUDIO - NO SPEECH DETECTED]" > "$transcript_file" || true
+    echo "   📝 Created placeholder transcript for silent audio"
     return 0
   fi
   
