@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # audio-telemetry: transcribe FLAC files using Whisper API with speaker diarization
 
-set -euo pipefail
+# Temporarily disable strict mode for debugging
+set -uo pipefail
+# set -e  # Commented out to prevent silent exits
 
 # Load environment variables from .env file
 if [[ -f "$(dirname "$0")/../.env" ]]; then
@@ -218,15 +220,23 @@ process_files() {
   local all_files=()
   
   # Use mapfile (readarray) which is more reliable than while loops
+  echo "   🔧 DEBUG: About to run find command..."
+  find "$AUDIO_DIR" \( -name "*.flac" -o -name "*.wav" \) -type f | head -5
+  echo "   🔧 DEBUG: Find command completed, running mapfile..."
+  
   mapfile -t all_files < <(find "$AUDIO_DIR" \( -name "*.flac" -o -name "*.wav" \) -type f | sort)
+  local mapfile_result=$?
+  echo "   🔧 DEBUG: mapfile exit code: $mapfile_result"
   
   total_files=${#all_files[@]}
+  echo "   🔧 DEBUG: Array populated with $total_files files"
   
   for audio_file in "${all_files[@]}"; do
     echo "      Found: $(basename "$audio_file")"
   done
   
   echo "   📊 Total audio files found: $total_files"
+  echo "   🔧 DEBUG: About to check if total_files is zero..."
   
   if [[ $total_files -eq 0 ]]; then
     echo "   ⚠ No audio files found in $AUDIO_DIR"
@@ -236,10 +246,13 @@ process_files() {
   fi
   
   echo
+  echo "   🔧 DEBUG: Starting file processing loop..."
   
   # Process each file individually with better error handling
   local file_num=1
+  echo "   🔧 DEBUG: About to iterate through ${#all_files[@]} files..."
   for audio_file in "${all_files[@]}"; do
+    echo "   🔧 DEBUG: Processing array element $file_num: '$audio_file'"
     local base_name="$(basename "${audio_file%.*}")"
     local transcript_file="${OUTPUT_DIR}/${base_name}.txt"
     
