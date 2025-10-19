@@ -1,6 +1,7 @@
 test-audio/
 audio/
 text/
+.temp-audio
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -207,32 +207,83 @@ transcribe_file() {
 # Function to process all unprocessed files
 process_files() {
   local processed_count=0
+  local skipped_count=0
+  local error_count=0
+  local total_files=0
   
   echo "🔍 Checking for unprocessed files..."
   
-  # Find all audio files without corresponding transcripts
+  # First, collect all audio files into an array
+  echo "   📋 Scanning audio directory: $AUDIO_DIR"
+  local all_files=()
   while IFS= read -r -d '' audio_file; do
+    all_files+=("$audio_file")
+    echo "      Found: $(basename "$audio_file")"
+    ((total_files++))
+  done < <(find "$AUDIO_DIR" \( -name "*.flac" -o -name "*.wav" \) -type f -print0 | sort -z)
+  
+  echo "   📊 Total audio files found: $total_files"
+  
+  if [[ $total_files -eq 0 ]]; then
+    echo "   ⚠ No audio files found in $AUDIO_DIR"
+    echo "💤 No files to process"
+    echo "=========================="
+    return
+  fi
+  
+  echo
+  
+  # Process each file individually with better error handling
+  local file_num=1
+  for audio_file in "${all_files[@]}"; do
     local base_name="$(basename "${audio_file%.*}")"
     local transcript_file="${OUTPUT_DIR}/${base_name}.txt"
     
-    if [[ ! -f "$transcript_file" ]]; then
+    echo "🔎 Processing file $file_num of $total_files"
+    echo "   File: $(basename "$audio_file")"
+    echo "   Looking for existing transcript: $transcript_file"
+    
+    if [[ -f "$transcript_file" ]]; then
+      echo "   ⏭ Transcript already exists, skipping"
+      ((skipped_count++))
+    else
+      echo "   ✅ No existing transcript found - will process"
+      
+      # Try to transcribe with explicit error handling
       if transcribe_file "$audio_file"; then
+        echo "   🎉 Successfully transcribed: $(basename "$audio_file")"
         ((processed_count++))
+      else
+        echo "   💥 Failed to transcribe: $(basename "$audio_file")"
+        ((error_count++))
+        echo "   🔄 Continuing with next file despite error..."
       fi
       
       # Small delay to avoid rate limiting
-      sleep 2
-    else
-      echo "⏭ Already processed: $(basename "$audio_file")"
+      if [[ $file_num -lt $total_files ]]; then
+        echo "   ⏱ Waiting 2 seconds before next file..."
+        sleep 2
+      fi
     fi
-  done < <(find "$AUDIO_DIR" \( -name "*.flac" -o -name "*.wav" \) -type f -print0 | sort -z)
+    
+    echo "   ---"
+    ((file_num++))
+  done
+  
+  echo "📊 FINAL SUMMARY:"
+  echo "   📁 Total files found: $total_files"
+  echo "   ✅ Successfully processed: $processed_count"
+  echo "   ⏭ Skipped (already done): $skipped_count"
+  echo "   ❌ Errors encountered: $error_count"
   
   if [[ $processed_count -gt 0 ]]; then
-    echo "✅ Processed $processed_count new files"
+    echo "🎉 Successfully processed $processed_count new files this round!"
+  elif [[ $total_files -gt 0 && $skipped_count -eq $total_files ]]; then
+    echo "✨ All files already processed - nothing new to do"
   else
-    echo "💤 No new files to process"
+    echo "💤 No new files were processed"
   fi
-  echo "---"
+  echo "=========================="
 }
 
 # Cleanup function
